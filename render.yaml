@@ -9,6 +9,9 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      # This allows the backend to accept requests from the frontend
+      - key: FRONTEND_URL
+        value: https://deepseek-frontend.onrender.com
     autoDeploy: true
 
   # 2. The Frontend Service (React/Vite)
@@ -19,10 +22,9 @@ services:
     buildCommand: npm install && npm run build
     startCommand: npm run preview -- --host 0.0.0.0 --port $PORT
     envVars:
+      # IMPORTANT: Render assigns a unique URL (e.g., deepseek-backend-xyz.onrender.com).
+      # If the default below doesn't work, copy your Backend Service URL from the Render Dashboard
+      # and update this Environment Variable in the Frontend Service settings.
       - key: VITE_API_URL
-        fromService:
-          type: web
-          name: deepseek-backend
-          property: url
+        value: https://deepseek-backend.onrender.com
     autoDeploy: true
-    
