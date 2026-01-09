@@ -2,17 +2,22 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 import tempfile
+import pickle
+import logging
 from werkzeug.utils import secure_filename
 import PyPDF2
+
+# LangChain Imports
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
-import openai
-import pickle
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
@@ -22,10 +27,9 @@ ALLOWED_EXTENSIONS = {'pdf', 'txt', 'docx'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 SESSION_FILE = 'deepseek_data.pkl'
 
-# Global state
 sessions = {}
 
-# --- PROMPTS (Same as server.py) ---
+# --- PROMPTS ---
 condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question.
 If the question is greetings or chat, leave it as is.
 
@@ -48,8 +52,8 @@ CONVERSATION HISTORY:
 USER QUESTION: {question}
 
 INSTRUCTIONS:
-1. Prioritize answering from the "CONTEXT FROM DOCUMENTS".
-2. If the answer is in the "CONVERSATION HISTORY", use that.
+1. FIRST, check the "CONTEXT FROM DOCUMENTS".
+2. SECOND, check the "CONVERSATION HISTORY".
 3. If neither, use general knowledge but mention it is not in the docs.
 4. Be conversational.
 
@@ -65,7 +69,7 @@ def load_sessions():
             with open(SESSION_FILE, 'rb') as f:
                 return pickle.load(f)
     except Exception as e:
-        print(f"Error loading sessions: {e}")
+        logger.error(f"Error loading sessions: {e}")
     return {}
 
 def save_sessions(data):
@@ -73,9 +77,8 @@ def save_sessions(data):
         with open(SESSION_FILE, 'wb') as f:
             pickle.dump(data, f)
     except Exception as e:
-        print(f"Error saving sessions: {e}")
+        logger.error(f"Error saving sessions: {e}")
 
-# Load on startup
 sessions = load_sessions()
 
 def allowed_file(filename):
@@ -86,21 +89,29 @@ def extract_text_from_pdf(filepath):
     with open(filepath, 'rb') as file:
         pdf_reader = PyPDF2.PdfReader(file)
         for page in pdf_reader.pages:
-            text += page.extract_text()
+            t = page.extract_text()
+            if t: text += t
     return text
 
 def extract_text_from_txt(filepath):
     with open(filepath, 'r', encoding='utf-8') as file:
         return file.read()
 
-# Helper to rebuild runtime objects from pickled data
+def format_chat_history(history):
+    formatted = []
+    for msg in history:
+        if isinstance(msg, HumanMessage): formatted.append(f"User: {msg.content}")
+        elif isinstance(msg, AIMessage): formatted.append(f"Assistant: {msg.content}")
+        else: formatted.append(f"System: {msg.content}")
+    return "\n".join(formatted)
+
 def get_session_objects(session_id):
     if session_id not in sessions:
         return None
     
     s_data = sessions[session_id]
     
-    # 1. Rebuild Memory
+    # Rebuild Memory
     memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
     history_data = s_data.get('history', [])
     for role, content in history_data:
@@ -109,7 +120,7 @@ def get_session_objects(session_id):
         elif role == 'assistant':
             memory.chat_memory.add_ai_message(content)
             
-    # 2. Rebuild Vectorstore
+    # Rebuild Vectorstore
     vectorstore = None
     if s_data.get('chunks') and os.environ.get('OPENAI_API_KEY'):
         embeddings = OpenAIEmbeddings()
@@ -129,19 +140,15 @@ def set_config():
     data = request.json
     api_key = data.get('api_key')
     if api_key:
-        openai.api_key = api_key
         os.environ['OPENAI_API_KEY'] = api_key
         return jsonify({"message": "API key configured"}), 200
     return jsonify({"error": "No API key provided"}), 400
 
 @app.route('/upload/<session_id>', methods=['POST'])
 def upload_file(session_id):
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part"}), 400
-    
+    if 'file' not in request.files: return jsonify({"error": "No file part"}), 400
     file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
+    if file.filename == '': return jsonify({"error": "No selected file"}), 400
     
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
@@ -149,33 +156,22 @@ def upload_file(session_id):
         file.save(filepath)
         
         try:
-            if filename.endswith('.pdf'):
-                text = extract_text_from_pdf(filepath)
-            elif filename.endswith('.txt'):
-                text = extract_text_from_txt(filepath)
-            else:
-                return jsonify({"error": "Unsupported file type"}), 400
+            if filename.endswith('.pdf'): text = extract_text_from_pdf(filepath)
+            elif filename.endswith('.txt'): text = extract_text_from_txt(filepath)
+            else: return jsonify({"error": "Unsupported file type"}), 400
             
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
             chunks = text_splitter.split_text(text)
             
-            if session_id not in sessions:
-                sessions[session_id] = {'chunks': [], 'history': []}
-            
+            if session_id not in sessions: sessions[session_id] = {'chunks': [], 'history': []}
             sessions[session_id]['chunks'].extend(chunks)
             save_sessions(sessions)
-            
             os.remove(filepath)
-            return jsonify({
-                "message": "File processed successfully",
-                "chunks_count": len(chunks),
-                "filename": filename
-            }), 200
-        except Exception as e:
-            print(f"Upload error: {e}")
-            return jsonify({"error": str(e)}), 500
             
-    return jsonify({"error": "File type not allowed"}), 400
+            return jsonify({"message": "Success", "chunks_count": len(chunks)}), 200
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "Invalid file"}), 400
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -183,15 +179,11 @@ def chat():
     session_id = data.get('session_id')
     message = data.get('message')
     
-    if not session_id or not message:
-        return jsonify({"error": "Missing session_id or message"}), 400
-        
-    if not os.environ.get('OPENAI_API_KEY'):
-        return jsonify({"response": "API Key is missing. Please check settings.", "sources": []}), 200
+    if not session_id or not message: return jsonify({"error": "Missing data"}), 400
+    if not os.environ.get('OPENAI_API_KEY'): return jsonify({"response": "API Key missing"}), 200
 
     runtime = get_session_objects(session_id)
-    if not runtime:
-         return jsonify({"response": "Please upload a document first.", "sources": []}), 200
+    if not runtime: return jsonify({"response": "Upload document first."}), 200
 
     try:
         llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo")
@@ -200,55 +192,44 @@ def chat():
         memory = runtime['memory']
         chat_history = memory.load_memory_variables({})['chat_history']
         
-        # 2. Standalone Question
+        # 2. Standalone
         standalone_question = message
         if chat_history:
+            history_str = format_chat_history(chat_history)
             condense_chain = LLMChain(llm=llm, prompt=CONDENSE_PROMPT)
-            history_str = "\n".join([f"{m.type}: {m.content}" for m in chat_history])
             standalone_question = condense_chain.run(chat_history=history_str, question=message)
         
         # 3. Retrieve
-        docs = []
-        context_text = "No documents found."
+        context_text = "No docs found."
         sources = []
-        
         if runtime['vectorstore']:
             docs = runtime['vectorstore'].similarity_search(standalone_question, k=4)
             if docs:
                 context_text = "\n\n".join([d.page_content for d in docs])
-                for d in docs[:3]:
-                    sources.append(d.page_content[:150].replace('\n', ' ') + "...")
+                sources = [d.page_content[:100] + "..." for d in docs[:3]]
         
         # 4. Answer
-        history_str = "\n".join([f"{m.type}: {m.content}" for m in chat_history])
+        history_str = format_chat_history(chat_history)
         answer_chain = LLMChain(llm=llm, prompt=ANSWER_PROMPT)
-        response = answer_chain.run(
-            context=context_text,
-            chat_history=history_str,
-            question=message 
-        )
+        response = answer_chain.run(context=context_text, chat_history=history_str, question=message)
         
         # 5. Save
         sessions[session_id]['history'].append(('user', message))
         sessions[session_id]['history'].append(('assistant', response))
         save_sessions(sessions)
         
-        return jsonify({
-            "response": response,
-            "sources": sources
-        }), 200
-        
+        return jsonify({"response": response, "sources": sources}), 200
     except Exception as e:
-        print(f"Chat error: {str(e)}")
-        return jsonify({"response": f"Error: {str(e)}", "sources": []}), 500
+        print(e)
+        return jsonify({"response": f"Error: {e}", "sources": []}), 500
 
 @app.route('/clear_memory/<session_id>', methods=['POST'])
 def clear_memory(session_id):
     if session_id in sessions:
         sessions[session_id]['history'] = []
         save_sessions(sessions)
-        return jsonify({"message": "Memory cleared"}), 200
-    return jsonify({"error": "Session not found"}), 404
+        return jsonify({"message": "Cleared"}), 200
+    return jsonify({"error": "Not found"}), 404
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
