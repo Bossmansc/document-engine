@@ -8,13 +8,11 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.chat_models import ChatOpenAI
-from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 import openai
-import json
 import pickle
-import base64
 
 app = Flask(__name__)
 CORS(app)
@@ -24,11 +22,12 @@ ALLOWED_EXTENSIONS = {'pdf', 'txt', 'docx'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 SESSION_FILE = 'deepseek_data.pkl'
 
-runtime_cache = {}
+# Global state
 sessions = {}
 
-# --- PROMPTS ---
-condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question. If it's general conversation, keep it as is.
+# --- PROMPTS (Same as server.py) ---
+condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question.
+If the question is greetings or chat, leave it as is.
 
 Chat History:
 {chat_history}
@@ -36,19 +35,29 @@ Chat History:
 Follow Up Input: {question}
 
 Standalone question:"""
-CONDENSE_QUESTION_PROMPT = PromptTemplate.from_template(condense_template)
+CONDENSE_PROMPT = PromptTemplate.from_template(condense_template)
 
-answer_template = """You are a helpful, conversational AI assistant analyzing documents.
-Use the following pieces of context to answer the user's question. 
-If the context doesn't contain the answer, you can answer from your general knowledge, but explicitly mention that it's not in the documents.
+answer_template = """You are a highly intelligent and conversational AI assistant capable of analyzing documents.
 
-Context:
+CONTEXT FROM DOCUMENTS:
 {context}
 
-Question: {question}
+CONVERSATION HISTORY:
+{chat_history}
+
+USER QUESTION: {question}
+
+INSTRUCTIONS:
+1. Prioritize answering from the "CONTEXT FROM DOCUMENTS".
+2. If the answer is in the "CONVERSATION HISTORY", use that.
+3. If neither, use general knowledge but mention it is not in the docs.
+4. Be conversational.
 
 Answer:"""
-ANSWER_PROMPT = PromptTemplate.from_template(answer_template)
+ANSWER_PROMPT = PromptTemplate(
+    input_variables=["context", "chat_history", "question"], 
+    template=answer_template
+)
 
 def load_sessions():
     try:
@@ -66,6 +75,7 @@ def save_sessions(data):
     except Exception as e:
         print(f"Error saving sessions: {e}")
 
+# Load on startup
 sessions = load_sessions()
 
 def allowed_file(filename):
@@ -83,63 +93,32 @@ def extract_text_from_txt(filepath):
     with open(filepath, 'r', encoding='utf-8') as file:
         return file.read()
 
-def get_session_runtime(session_id):
-    if session_id in runtime_cache:
-        return runtime_cache[session_id]
-    
+# Helper to rebuild runtime objects from pickled data
+def get_session_objects(session_id):
     if session_id not in sessions:
         return None
-        
-    session_data = sessions[session_id]
-    chunks = session_data.get('chunks', [])
     
-    if not chunks:
-        return None
-        
-    if not os.environ.get('OPENAI_API_KEY'):
-        return None
-
-    try:
-        print(f"Rebuilding runtime for session {session_id}")
-        
+    s_data = sessions[session_id]
+    
+    # 1. Rebuild Memory
+    memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
+    history_data = s_data.get('history', [])
+    for role, content in history_data:
+        if role == 'user':
+            memory.chat_memory.add_user_message(content)
+        elif role == 'assistant':
+            memory.chat_memory.add_ai_message(content)
+            
+    # 2. Rebuild Vectorstore
+    vectorstore = None
+    if s_data.get('chunks') and os.environ.get('OPENAI_API_KEY'):
         embeddings = OpenAIEmbeddings()
-        vectorstore = FAISS.from_texts(chunks, embeddings)
+        vectorstore = FAISS.from_texts(s_data['chunks'], embeddings)
         
-        memory = ConversationBufferMemory(
-            memory_key='chat_history',
-            return_messages=True,
-            output_key='answer'
-        )
-        
-        # Restore memory from disk
-        saved_history = session_data.get('history', [])
-        for role, content in saved_history:
-            if role == 'user':
-                memory.chat_memory.add_user_message(content)
-            elif role == 'assistant':
-                memory.chat_memory.add_ai_message(content)
-        
-        llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo")
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-        
-        chain = ConversationalRetrievalChain.from_llm(
-            llm=llm,
-            retriever=retriever,
-            memory=memory,
-            return_source_documents=True,
-            verbose=True,
-            condense_question_prompt=CONDENSE_QUESTION_PROMPT,
-            combine_docs_chain_kwargs={"prompt": ANSWER_PROMPT}
-        )
-        
-        runtime_cache[session_id] = {
-            'chain': chain,
-            'memory': memory
-        }
-        return runtime_cache[session_id]
-    except Exception as e:
-        print(f"Failed to rebuild runtime: {e}")
-        return None
+    return {
+        'memory': memory,
+        'vectorstore': vectorstore
+    }
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -177,11 +156,7 @@ def upload_file(session_id):
             else:
                 return jsonify({"error": "Unsupported file type"}), 400
             
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200,
-                length_function=len,
-            )
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
             chunks = text_splitter.split_text(text)
             
             if session_id not in sessions:
@@ -190,12 +165,7 @@ def upload_file(session_id):
             sessions[session_id]['chunks'].extend(chunks)
             save_sessions(sessions)
             
-            # Invalidate cache
-            if session_id in runtime_cache:
-                del runtime_cache[session_id]
-            
             os.remove(filepath)
-            
             return jsonify({
                 "message": "File processed successfully",
                 "chunks_count": len(chunks),
@@ -204,7 +174,7 @@ def upload_file(session_id):
         except Exception as e:
             print(f"Upload error: {e}")
             return jsonify({"error": str(e)}), 500
-    
+            
     return jsonify({"error": "File type not allowed"}), 400
 
 @app.route('/chat', methods=['POST'])
@@ -215,53 +185,68 @@ def chat():
     
     if not session_id or not message:
         return jsonify({"error": "Missing session_id or message"}), 400
-    
+        
     if not os.environ.get('OPENAI_API_KEY'):
         return jsonify({"response": "API Key is missing. Please check settings.", "sources": []}), 200
 
-    runtime = get_session_runtime(session_id)
-    
+    runtime = get_session_objects(session_id)
     if not runtime:
-         if session_id in sessions and sessions[session_id]['chunks']:
-             return jsonify({"response": "Initializing chat engine...", "sources": []}), 200
-         else:
-             return jsonify({"response": "Please upload a document first.", "sources": []}), 200
+         return jsonify({"response": "Please upload a document first.", "sources": []}), 200
 
     try:
-        qa_chain = runtime['chain']
-        result = qa_chain({"question": message})
-        answer = result['answer']
+        llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo")
         
-        # Persist history
+        # 1. History
+        memory = runtime['memory']
+        chat_history = memory.load_memory_variables({})['chat_history']
+        
+        # 2. Standalone Question
+        standalone_question = message
+        if chat_history:
+            condense_chain = LLMChain(llm=llm, prompt=CONDENSE_PROMPT)
+            history_str = "\n".join([f"{m.type}: {m.content}" for m in chat_history])
+            standalone_question = condense_chain.run(chat_history=history_str, question=message)
+        
+        # 3. Retrieve
+        docs = []
+        context_text = "No documents found."
+        sources = []
+        
+        if runtime['vectorstore']:
+            docs = runtime['vectorstore'].similarity_search(standalone_question, k=4)
+            if docs:
+                context_text = "\n\n".join([d.page_content for d in docs])
+                for d in docs[:3]:
+                    sources.append(d.page_content[:150].replace('\n', ' ') + "...")
+        
+        # 4. Answer
+        history_str = "\n".join([f"{m.type}: {m.content}" for m in chat_history])
+        answer_chain = LLMChain(llm=llm, prompt=ANSWER_PROMPT)
+        response = answer_chain.run(
+            context=context_text,
+            chat_history=history_str,
+            question=message 
+        )
+        
+        # 5. Save
         sessions[session_id]['history'].append(('user', message))
-        sessions[session_id]['history'].append(('assistant', answer))
+        sessions[session_id]['history'].append(('assistant', response))
         save_sessions(sessions)
         
-        sources = []
-        if 'source_documents' in result:
-            for doc in result['source_documents'][:3]:
-                source_text = doc.page_content[:150] + "..." if len(doc.page_content) > 150 else doc.page_content
-                sources.append(source_text)
-        
         return jsonify({
-            "response": answer,
+            "response": response,
             "sources": sources
         }), 200
         
     except Exception as e:
         print(f"Chat error: {str(e)}")
-        return jsonify({
-            "response": f"Error: {str(e)}",
-            "sources": []
-        }), 500
+        return jsonify({"response": f"Error: {str(e)}", "sources": []}), 500
 
 @app.route('/clear_memory/<session_id>', methods=['POST'])
 def clear_memory(session_id):
     if session_id in sessions:
         sessions[session_id]['history'] = []
         save_sessions(sessions)
-        if session_id in runtime_cache:
-            runtime_cache[session_id]['memory'].clear()
         return jsonify({"message": "Memory cleared"}), 200
     return jsonify({"error": "Session not found"}), 404
 

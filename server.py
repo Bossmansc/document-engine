@@ -8,9 +8,9 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.chat_models import ChatOpenAI
-from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 import openai
 
 app = Flask(__name__)
@@ -26,9 +26,10 @@ sessions = {}
 
 # --- PROMPTS ---
 
-# 1. CONDENSE QUESTION PROMPT
-# This turns "What about the second one?" into "What are the details of the second document mentioned?" based on history.
-condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question, in its original language. If the follow up question is a casual greeting or not related to the documents, just return it as is.
+# 1. STANDALONE QUESTION GENERATOR
+# Takes history + new question -> Search Query
+condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question that captures all necessary context from the history.
+If the question is a greeting or purely conversational (like "hello", "how are you"), just return it as is.
 
 Chat History:
 {chat_history}
@@ -36,23 +37,31 @@ Chat History:
 Follow Up Input: {question}
 
 Standalone question:"""
-CONDENSE_QUESTION_PROMPT = PromptTemplate.from_template(condense_template)
+CONDENSE_PROMPT = PromptTemplate.from_template(condense_template)
 
-# 2. ANSWER PROMPT
-# This guides the final answer generation to be conversational.
-answer_template = """You are a helpful, conversational AI assistant analyzing documents.
-Use the following pieces of context to answer the user's question. 
-If the context doesn't contain the answer, you can answer from your general knowledge, but you must explicitly state: "This isn't mentioned in the documents, but generally..." or similar.
-Do not make up facts about the document itself.
+# 2. FINAL ANSWER GENERATOR
+# Takes History + Docs + Query -> Final Answer
+answer_template = """You are a highly intelligent and conversational AI assistant capable of analyzing documents.
 
-Context:
+CONTEXT FROM DOCUMENTS:
 {context}
 
-Question: {question}
+CONVERSATION HISTORY:
+{chat_history}
+
+USER QUESTION: {question}
+
+INSTRUCTIONS:
+1. Prioritize answering from the "CONTEXT FROM DOCUMENTS" if the information is there.
+2. If the answer is in the "CONVERSATION HISTORY" (e.g., user's name, previous topic), use that.
+3. If the answer is not in documents or history, you may use general knowledge but strictly label it as such (e.g., "This isn't in the documents, but...").
+4. Be conversational and helpful.
 
 Answer:"""
-ANSWER_PROMPT = PromptTemplate.from_template(answer_template)
-
+ANSWER_PROMPT = PromptTemplate(
+    input_variables=["context", "chat_history", "question"], 
+    template=answer_template
+)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -98,6 +107,7 @@ def upload_file(session_id):
         file.save(filepath)
         
         try:
+            # 1. Extract Text
             if filename.endswith('.pdf'):
                 text = extract_text_from_pdf(filepath)
             elif filename.endswith('.txt'):
@@ -105,6 +115,7 @@ def upload_file(session_id):
             else:
                 return jsonify({"error": "Unsupported file type"}), 400
             
+            # 2. Chunk Text
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=1000,
                 chunk_overlap=200,
@@ -112,40 +123,22 @@ def upload_file(session_id):
             )
             chunks = text_splitter.split_text(text)
             
-            # Init session if needed
+            # 3. Initialize Session Data
             if session_id not in sessions:
                 sessions[session_id] = {
                     'chunks': [],
                     'vectorstore': None,
-                    'chain': None,
                     'memory': ConversationBufferMemory(
                         memory_key='chat_history',
-                        return_messages=True,
-                        output_key='answer'
+                        input_key='question',
+                        return_messages=True
                     )
                 }
             
-            # Store chunks
+            # 4. Update Vectors
             sessions[session_id]['chunks'].extend(chunks)
-            
-            # Rebuild Vectorstore
             embeddings = OpenAIEmbeddings()
             sessions[session_id]['vectorstore'] = FAISS.from_texts(sessions[session_id]['chunks'], embeddings)
-            
-            # Rebuild Chain with Custom Prompts
-            llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo")
-            retriever = sessions[session_id]['vectorstore'].as_retriever(search_kwargs={"k": 4})
-            
-            qa_chain = ConversationalRetrievalChain.from_llm(
-                llm=llm,
-                retriever=retriever,
-                memory=sessions[session_id]['memory'],
-                return_source_documents=True,
-                verbose=True,
-                condense_question_prompt=CONDENSE_QUESTION_PROMPT,
-                combine_docs_chain_kwargs={"prompt": ANSWER_PROMPT}
-            )
-            sessions[session_id]['chain'] = qa_chain
             
             os.remove(filepath)
             
@@ -169,23 +162,55 @@ def chat():
     if not session_id or not message:
         return jsonify({"error": "Missing session_id or message"}), 400
     
-    if session_id not in sessions or not sessions[session_id]['chain']:
-        return jsonify({"response": "I'm ready to help, but please upload some documents first so I have context!", "sources": []}), 200
+    # Validation
+    if session_id not in sessions:
+         return jsonify({"response": "Session not found. Please upload a document to start.", "sources": []}), 200
+    
+    session = sessions[session_id]
     
     try:
-        qa_chain = sessions[session_id]['chain']
+        llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo")
         
-        # The chain handles memory automatically via the 'memory' object passed during init
-        result = qa_chain({"question": message})
+        # 1. Get Chat History
+        memory = session['memory']
+        chat_history = memory.load_memory_variables({})['chat_history']
         
+        # 2. Generate Standalone Question (if history exists)
+        standalone_question = message
+        if chat_history:
+            condense_chain = LLMChain(llm=llm, prompt=CONDENSE_PROMPT)
+            # We convert list of messages to string for the prompt
+            history_str = "\n".join([f"{m.type}: {m.content}" for m in chat_history])
+            standalone_question = condense_chain.run(chat_history=history_str, question=message)
+        
+        # 3. Retrieve Documents (if vectorstore exists)
+        docs = []
+        context_text = "No documents uploaded."
         sources = []
-        if 'source_documents' in result:
-            for doc in result['source_documents'][:3]:
-                source_text = doc.page_content[:150] + "..." if len(doc.page_content) > 150 else doc.page_content
+        
+        if session['vectorstore']:
+            docs = session['vectorstore'].similarity_search(standalone_question, k=4)
+            context_text = "\n\n".join([d.page_content for d in docs])
+            for d in docs[:3]:
+                source_text = d.page_content[:150].replace('\n', ' ') + "..."
                 sources.append(source_text)
+
+        # 4. Generate Answer
+        # We manually format the inputs for the Answer Prompt to ensure history is included
+        history_str = "\n".join([f"{m.type}: {m.content}" for m in chat_history])
+        
+        answer_chain = LLMChain(llm=llm, prompt=ANSWER_PROMPT)
+        response = answer_chain.run(
+            context=context_text,
+            chat_history=history_str,
+            question=message 
+        )
+        
+        # 5. Save Interaction to Memory
+        memory.save_context({"question": message}, {"answer": response})
         
         return jsonify({
-            "response": result['answer'],
+            "response": response,
             "sources": sources
         }), 200
         
@@ -201,9 +226,16 @@ def debug_session(session_id):
         return jsonify({
             "has_chunks": len(sessions[session_id]['chunks']) > 0,
             "has_vectorstore": sessions[session_id]['vectorstore'] is not None,
-            "has_chain": sessions[session_id]['chain'] is not None,
-            "memory_message_count": msgs
+            "memory_message_count": msgs,
+            "type": "InMemory (Cloud)"
         }), 200
+    return jsonify({"error": "Session not found"}), 404
+
+@app.route('/clear_memory/<session_id>', methods=['POST'])
+def clear_memory(session_id):
+    if session_id in sessions:
+        sessions[session_id]['memory'].clear()
+        return jsonify({"message": "Memory cleared"}), 200
     return jsonify({"error": "Session not found"}), 404
 
 if __name__ == '__main__':
