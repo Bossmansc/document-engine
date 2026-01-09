@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Settings, Key, Save, Download, Upload, Trash2 } from 'lucide-react';
+import { Settings, Key, Save, Download, Upload, Trash2, Edit2, Plus } from 'lucide-react';
 import { Session } from '../types';
 
 interface SettingsPanelProps {
@@ -16,6 +16,7 @@ interface SettingsPanelProps {
   onLoadSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
   onExportSession: (id: string) => void;
+  onRenameSession?: (id: string, name: string) => void;
   onClose: () => void;
 }
 
@@ -28,23 +29,23 @@ export default function SettingsPanel({
   onLoadSession,
   onDeleteSession,
   onExportSession,
+  onRenameSession,
   onClose
 }: SettingsPanelProps) {
   const [newSessionName, setNewSessionName] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
 
   const handleImportSession = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
         const sessionData = JSON.parse(event.target?.result as string);
-        // Validate and add session
         if (sessionData.id && sessionData.name) {
-          onCreateSession(sessionData.name);
-          // In a real app, you'd load the session data
+          console.log("Importing not fully wired in UI yet");
         }
       } catch (error) {
         console.error('Failed to import session:', error);
@@ -53,11 +54,23 @@ export default function SettingsPanel({
     reader.readAsText(file);
   };
 
+  const startEditing = (session: Session) => {
+      setEditingId(session.id);
+      setEditName(session.name);
+  };
+
+  const saveEdit = () => {
+      if (editingId && editName.trim() && onRenameSession) {
+          onRenameSession(editingId, editName.trim());
+          setEditingId(null);
+      }
+  };
+
   return (
     <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+      <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl">
         {/* Header */}
-        <div className="p-6 border-b border-slate-800">
+        <div className="p-6 border-b border-slate-800 bg-slate-900 sticky top-0 z-10">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-blue-500/10 rounded-lg">
@@ -84,7 +97,6 @@ export default function SettingsPanel({
               <Key className="w-4 h-4" />
               DeepSeek API Configuration
             </h3>
-            
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-slate-400 mb-2">API Key</label>
@@ -94,47 +106,20 @@ export default function SettingsPanel({
                     value={config.apiKey}
                     onChange={(e) => onUpdateConfig({ apiKey: e.target.value })}
                     placeholder="sk-..."
-                    className="w-full bg-slate-950 border border-slate-700 text-slate-200 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    className="w-full bg-slate-950 border border-slate-700 text-slate-200 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono"
                   />
                   <button
                     onClick={() => setShowApiKey(!showApiKey)}
-                    className="absolute right-3 top-3 text-slate-400 hover:text-slate-200"
+                    className="absolute right-3 top-3 text-slate-400 hover:text-slate-200 text-xs uppercase tracking-wider font-medium"
                   >
                     {showApiKey ? 'Hide' : 'Show'}
                   </button>
                 </div>
                 <p className="text-xs text-slate-500 mt-2">
-                  Your API key is stored locally and never sent to our servers.
+                  Key is securely sent to your Python backend for this session.
                 </p>
               </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm text-slate-400 mb-2">Chunk Size</label>
-                  <input
-                    type="number"
-                    value={config.chunkSize}
-                    onChange={(e) => onUpdateConfig({ chunkSize: parseInt(e.target.value) })}
-                    className="w-full bg-slate-950 border border-slate-700 text-slate-200 rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
-                    min="500"
-                    max="5000"
-                    step="100"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-slate-400 mb-2">Overlap Size</label>
-                  <input
-                    type="number"
-                    value={config.overlapSize}
-                    onChange={(e) => onUpdateConfig({ overlapSize: parseInt(e.target.value) })}
-                    className="w-full bg-slate-950 border border-slate-700 text-slate-200 rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
-                    min="0"
-                    max="1000"
-                    step="50"
-                  />
-                </div>
-              </div>
-
+              
               <div className="flex items-center gap-3">
                 <input
                   type="checkbox"
@@ -144,26 +129,21 @@ export default function SettingsPanel({
                   className="w-4 h-4 text-blue-500 bg-slate-800 border-slate-700 rounded focus:ring-blue-500 focus:ring-offset-slate-900"
                 />
                 <label htmlFor="autoSave" className="text-sm text-slate-300">
-                  Auto-save sessions
+                  Auto-save sessions to local storage
                 </label>
               </div>
             </div>
           </div>
 
+          <div className="h-px bg-slate-800" />
+
           {/* Session Management */}
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-medium text-slate-200">Session Management</h3>
-              <div className="flex gap-2">
-                <label className="cursor-pointer px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm font-medium transition-colors border border-slate-700 flex items-center gap-2">
-                  <Upload className="w-3 h-3" />
-                  Import
-                  <input type="file" accept=".json" className="hidden" onChange={handleImportSession} />
-                </label>
-              </div>
             </div>
 
-            {/* Create New Session */}
+            {/* Create Session */}
             <div className="flex gap-2">
               <input
                 type="text"
@@ -171,6 +151,7 @@ export default function SettingsPanel({
                 onChange={(e) => setNewSessionName(e.target.value)}
                 placeholder="New session name"
                 className="flex-1 bg-slate-950 border border-slate-700 text-slate-200 rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
+                onKeyDown={(e) => e.key === 'Enter' && newSessionName.trim() && (onCreateSession(newSessionName), setNewSessionName(''))}
               />
               <button
                 onClick={() => {
@@ -179,38 +160,62 @@ export default function SettingsPanel({
                     setNewSessionName('');
                   }
                 }}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors"
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors flex items-center gap-2"
               >
-                Create
+                <Plus className="w-4 h-4" /> Create
               </button>
             </div>
 
-            {/* Sessions List */}
-            <div className="space-y-2 max-h-60 overflow-y-auto">
-              {sessions.map((session) => (
+            {/* Session List */}
+            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+              {sessions.sort((a,b) => b.updatedAt - a.updatedAt).map((session) => (
                 <div
                   key={session.id}
-                  className={`p-3 rounded-lg border transition-colors ${
+                  className={`p-3 rounded-lg border transition-all ${
                     currentSessionId === session.id
-                      ? 'bg-blue-500/10 border-blue-500/30'
+                      ? 'bg-blue-900/20 border-blue-500/50'
                       : 'bg-slate-800/40 border-slate-800 hover:border-slate-700'
                   }`}
                 >
                   <div className="flex items-center justify-between">
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-slate-200 truncate">{session.name}</p>
+                    <div className="min-w-0 flex-1 mr-4">
+                      {editingId === session.id ? (
+                          <div className="flex gap-2">
+                              <input 
+                                value={editName}
+                                onChange={e => setEditName(e.target.value)}
+                                className="bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm text-white w-full"
+                                autoFocus
+                                onBlur={saveEdit}
+                                onKeyDown={e => e.key === 'Enter' && saveEdit()}
+                              />
+                          </div>
+                      ) : (
+                        <div className="group flex items-center gap-2">
+                            <p className="text-sm font-medium text-slate-200 truncate cursor-pointer" onClick={() => onLoadSession(session.id)}>
+                                {session.name}
+                            </p>
+                            {onRenameSession && (
+                                <button onClick={() => startEditing(session)} className="opacity-0 group-hover:opacity-100 p-1 text-slate-500 hover:text-white transition-opacity">
+                                    <Edit2 className="w-3 h-3" />
+                                </button>
+                            )}
+                        </div>
+                      )}
+                      
                       <div className="flex items-center gap-3 mt-1">
                         <span className="text-xs text-slate-500">
-                          {new Date(session.createdAt).toLocaleDateString()}
+                          {new Date(session.updatedAt || session.createdAt).toLocaleDateString()}
                         </span>
                         <span className="text-xs text-slate-500">
-                          {session.files.length} files
+                          {session.files.length} file{session.files.length !== 1 ? 's' : ''}
                         </span>
                         <span className="text-xs text-slate-500">
-                          {session.messages.length} messages
+                          {session.messages.length} msg
                         </span>
                       </div>
                     </div>
+                    
                     <div className="flex items-center gap-1 flex-shrink-0">
                       {currentSessionId !== session.id && (
                         <button
@@ -224,9 +229,9 @@ export default function SettingsPanel({
                       <button
                         onClick={() => onExportSession(session.id)}
                         className="p-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-white transition-colors"
-                        title="Export session"
+                        title="Export JSON"
                       >
-                        <Download className="w-4 h-4" />
+                         <Download className="w-4 h-4" />
                       </button>
                       <button
                         onClick={() => onDeleteSession(session.id)}
@@ -239,10 +244,9 @@ export default function SettingsPanel({
                   </div>
                 </div>
               ))}
-              
               {sessions.length === 0 && (
                 <div className="text-center py-6 text-slate-600 text-sm">
-                  No sessions yet. Create one to get started.
+                  No sessions yet.
                 </div>
               )}
             </div>
@@ -250,13 +254,13 @@ export default function SettingsPanel({
         </div>
 
         {/* Footer */}
-        <div className="p-6 border-t border-slate-800">
+        <div className="p-6 border-t border-slate-800 bg-slate-900 sticky bottom-0 rounded-b-xl">
           <div className="flex justify-end">
             <button
               onClick={onClose}
               className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg font-medium transition-colors"
             >
-              Close
+              Done
             </button>
           </div>
         </div>

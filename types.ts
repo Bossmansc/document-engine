@@ -9,6 +9,7 @@ export interface UploadedFile {
   chunksProcessed: number;
   totalChunks: number;
   content?: string;
+  url?: string; 
   chunks?: DocumentChunk[];
   analysisResults?: string[];
 }
@@ -54,7 +55,7 @@ export interface Session {
   createdAt: number;
   updatedAt: number;
   files: UploadedFile[];
-  textSources: TextSource[]; // Added this field
+  textSources: TextSource[]; 
   messages: Message[];
   depth: AnalysisDepth;
 }
@@ -64,4 +65,10 @@ export interface AppConfig {
   autoSave: boolean;
   chunkSize: number;
   overlapSize: number;
+}
+
+// New interface for conversation history
+export interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
 }

@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { Upload, Link as LinkIcon, X, Loader2 } from 'lucide-react';
+import { Upload, Link as LinkIcon, X } from 'lucide-react';
 
 interface FileUploadProps {
   onFilesSelected: (files: File[]) => void;
@@ -9,7 +9,6 @@ interface FileUploadProps {
 export default function FileUpload({ onFilesSelected, onUrlAdd }: FileUploadProps) {
   const [showUrlInput, setShowUrlInput] = useState(false);
   const [url, setUrl] = useState('');
-  const [loading, setLoading] = useState(false);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
