@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { Settings, Key, Save, Download, Upload, Trash2, Edit2, Plus } from 'lucide-react';
+import { Settings, Key, Save, Download, Trash2, Edit2, Plus, Server } from 'lucide-react';
 import { Session } from '../types';
 
 interface SettingsPanelProps {
   config: {
     apiKey: string;
+    apiUrl: string;
     autoSave: boolean;
     chunkSize: number;
     overlapSize: number;
@@ -36,23 +37,6 @@ export default function SettingsPanel({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
-
-  const handleImportSession = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const sessionData = JSON.parse(event.target?.result as string);
-        if (sessionData.id && sessionData.name) {
-          console.log("Importing not fully wired in UI yet");
-        }
-      } catch (error) {
-        console.error('Failed to import session:', error);
-      }
-    };
-    reader.readAsText(file);
-  };
 
   const startEditing = (session: Session) => {
       setEditingId(session.id);
@@ -95,11 +79,13 @@ export default function SettingsPanel({
           <div className="space-y-4">
             <h3 className="text-lg font-medium text-slate-200 flex items-center gap-2">
               <Key className="w-4 h-4" />
-              DeepSeek API Configuration
+              API Configuration
             </h3>
+            
             <div className="space-y-4">
+              {/* API Key Input */}
               <div>
-                <label className="block text-sm text-slate-400 mb-2">API Key</label>
+                <label className="block text-sm text-slate-400 mb-2">DeepSeek API Key</label>
                 <div className="relative">
                   <input
                     type={showApiKey ? "text" : "password"}
@@ -115,12 +101,27 @@ export default function SettingsPanel({
                     {showApiKey ? 'Hide' : 'Show'}
                   </button>
                 </div>
+              </div>
+
+              {/* API URL Input */}
+              <div>
+                <label className="block text-sm text-slate-400 mb-2 flex items-center gap-2">
+                    <Server className="w-3 h-3" />
+                    Backend API URL
+                </label>
+                <input
+                  type="text"
+                  value={config.apiUrl || 'https://deepseek-monolith.onrender.com'}
+                  onChange={(e) => onUpdateConfig({ apiUrl: e.target.value })}
+                  placeholder="https://your-backend.onrender.com"
+                  className="w-full bg-slate-950 border border-slate-700 text-slate-200 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono text-sm"
+                />
                 <p className="text-xs text-slate-500 mt-2">
-                  Key is securely sent to your Python backend for this session.
+                  Default: https://deepseek-monolith.onrender.com. Change this if you deployed your own server.
                 </p>
               </div>
-              
-              <div className="flex items-center gap-3">
+
+              <div className="flex items-center gap-3 pt-2">
                 <input
                   type="checkbox"
                   id="autoSave"
@@ -142,7 +143,7 @@ export default function SettingsPanel({
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-medium text-slate-200">Session Management</h3>
             </div>
-
+            
             {/* Create Session */}
             <div className="flex gap-2">
               <input
@@ -202,7 +203,6 @@ export default function SettingsPanel({
                             )}
                         </div>
                       )}
-                      
                       <div className="flex items-center gap-3 mt-1">
                         <span className="text-xs text-slate-500">
                           {new Date(session.updatedAt || session.createdAt).toLocaleDateString()}
@@ -215,7 +215,6 @@ export default function SettingsPanel({
                         </span>
                       </div>
                     </div>
-                    
                     <div className="flex items-center gap-1 flex-shrink-0">
                       {currentSessionId !== session.id && (
                         <button

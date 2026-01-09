@@ -10,6 +10,7 @@ from langchain.vectorstores import FAISS
 from langchain.chat_models import ChatOpenAI
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
+from langchain.prompts import PromptTemplate
 import openai
 import json
 import pickle
@@ -18,26 +19,38 @@ import base64
 app = Flask(__name__)
 CORS(app)
 
-# Configuration
 UPLOAD_FOLDER = tempfile.gettempdir()
 ALLOWED_EXTENSIONS = {'pdf', 'txt', 'docx'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-
-# File for persistence
 SESSION_FILE = 'deepseek_data.pkl'
 
-# Global cache for runtime objects (Chains, Vectorstores) - NOT Pickled
 runtime_cache = {}
-
-# Data storage (Pickled)
-# sessions[id] = {
-#    'chunks': [],
-#    'history': []
-# }
 sessions = {}
 
+# --- PROMPTS ---
+condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question. If it's general conversation, keep it as is.
+
+Chat History:
+{chat_history}
+
+Follow Up Input: {question}
+
+Standalone question:"""
+CONDENSE_QUESTION_PROMPT = PromptTemplate.from_template(condense_template)
+
+answer_template = """You are a helpful, conversational AI assistant analyzing documents.
+Use the following pieces of context to answer the user's question. 
+If the context doesn't contain the answer, you can answer from your general knowledge, but explicitly mention that it's not in the documents.
+
+Context:
+{context}
+
+Question: {question}
+
+Answer:"""
+ANSWER_PROMPT = PromptTemplate.from_template(answer_template)
+
 def load_sessions():
-    """Load session data from local file"""
     try:
         if os.path.exists(SESSION_FILE):
             with open(SESSION_FILE, 'rb') as f:
@@ -47,14 +60,12 @@ def load_sessions():
     return {}
 
 def save_sessions(data):
-    """Save session data to local file"""
     try:
         with open(SESSION_FILE, 'wb') as f:
             pickle.dump(data, f)
     except Exception as e:
         print(f"Error saving sessions: {e}")
 
-# Load on startup
 sessions = load_sessions()
 
 def allowed_file(filename):
@@ -73,13 +84,9 @@ def extract_text_from_txt(filepath):
         return file.read()
 
 def get_session_runtime(session_id):
-    """Rebuilds or retrieves the Chain and VectorStore for a session."""
-    
-    # 1. Check Cache
     if session_id in runtime_cache:
         return runtime_cache[session_id]
     
-    # 2. Check Data
     if session_id not in sessions:
         return None
         
@@ -89,26 +96,22 @@ def get_session_runtime(session_id):
     if not chunks:
         return None
         
-    # Check API Key
     if not os.environ.get('OPENAI_API_KEY'):
-        print("API Key missing during runtime rebuild")
         return None
 
     try:
-        print(f"Rebuilding runtime for session {session_id} with {len(chunks)} chunks")
+        print(f"Rebuilding runtime for session {session_id}")
         
-        # Rebuild Vector Store
         embeddings = OpenAIEmbeddings()
         vectorstore = FAISS.from_texts(chunks, embeddings)
         
-        # Rebuild Memory
         memory = ConversationBufferMemory(
             memory_key='chat_history',
             return_messages=True,
             output_key='answer'
         )
         
-        # Populate Memory from stored history
+        # Restore memory from disk
         saved_history = session_data.get('history', [])
         for role, content in saved_history:
             if role == 'user':
@@ -116,7 +119,6 @@ def get_session_runtime(session_id):
             elif role == 'assistant':
                 memory.chat_memory.add_ai_message(content)
         
-        # Rebuild Chain
         llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo")
         retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
         
@@ -125,11 +127,12 @@ def get_session_runtime(session_id):
             retriever=retriever,
             memory=memory,
             return_source_documents=True,
-            verbose=True
+            verbose=True,
+            condense_question_prompt=CONDENSE_QUESTION_PROMPT,
+            combine_docs_chain_kwargs={"prompt": ANSWER_PROMPT}
         )
         
         runtime_cache[session_id] = {
-            'vectorstore': vectorstore,
             'chain': chain,
             'memory': memory
         }
@@ -167,7 +170,6 @@ def upload_file(session_id):
         file.save(filepath)
         
         try:
-            # Extract text
             if filename.endswith('.pdf'):
                 text = extract_text_from_pdf(filepath)
             elif filename.endswith('.txt'):
@@ -175,7 +177,6 @@ def upload_file(session_id):
             else:
                 return jsonify({"error": "Unsupported file type"}), 400
             
-            # Split text
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=1000,
                 chunk_overlap=200,
@@ -183,18 +184,16 @@ def upload_file(session_id):
             )
             chunks = text_splitter.split_text(text)
             
-            # Update Persistent Data
             if session_id not in sessions:
                 sessions[session_id] = {'chunks': [], 'history': []}
             
             sessions[session_id]['chunks'].extend(chunks)
             save_sessions(sessions)
             
-            # Invalidate cache to force rebuild with new data next time
+            # Invalidate cache
             if session_id in runtime_cache:
                 del runtime_cache[session_id]
             
-            # Cleanup
             os.remove(filepath)
             
             return jsonify({
@@ -202,7 +201,6 @@ def upload_file(session_id):
                 "chunks_count": len(chunks),
                 "filename": filename
             }), 200
-            
         except Exception as e:
             print(f"Upload error: {e}")
             return jsonify({"error": str(e)}), 500
@@ -218,36 +216,31 @@ def chat():
     if not session_id or not message:
         return jsonify({"error": "Missing session_id or message"}), 400
     
-    # 1. Ensure API Key
     if not os.environ.get('OPENAI_API_KEY'):
-        return jsonify({"response": "API Key is missing on the server. Please check settings.", "sources": []}), 200
+        return jsonify({"response": "API Key is missing. Please check settings.", "sources": []}), 200
 
-    # 2. Get Runtime
     runtime = get_session_runtime(session_id)
     
     if not runtime:
-        # Check if data exists
-        if session_id in sessions and sessions[session_id]['chunks']:
-             return jsonify({"response": "Error initializing chat engine. Please try again.", "sources": []}), 200
-        else:
-             return jsonify({"response": "No documents found. Please upload a file first.", "sources": []}), 200
+         if session_id in sessions and sessions[session_id]['chunks']:
+             return jsonify({"response": "Initializing chat engine...", "sources": []}), 200
+         else:
+             return jsonify({"response": "Please upload a document first.", "sources": []}), 200
 
     try:
-        # 3. Generate Response
         qa_chain = runtime['chain']
         result = qa_chain({"question": message})
         answer = result['answer']
         
-        # 4. Update History Persistence
+        # Persist history
         sessions[session_id]['history'].append(('user', message))
         sessions[session_id]['history'].append(('assistant', answer))
         save_sessions(sessions)
         
-        # Extract sources
         sources = []
         if 'source_documents' in result:
             for doc in result['source_documents'][:3]:
-                source_text = doc.page_content[:100] + "..." if len(doc.page_content) > 100 else doc.page_content
+                source_text = doc.page_content[:150] + "..." if len(doc.page_content) > 150 else doc.page_content
                 sources.append(source_text)
         
         return jsonify({
@@ -258,7 +251,7 @@ def chat():
     except Exception as e:
         print(f"Chat error: {str(e)}")
         return jsonify({
-            "response": f"Error processing your request: {str(e)}",
+            "response": f"Error: {str(e)}",
             "sources": []
         }), 500
 
@@ -267,31 +260,10 @@ def clear_memory(session_id):
     if session_id in sessions:
         sessions[session_id]['history'] = []
         save_sessions(sessions)
-        
-        # Clear runtime memory
         if session_id in runtime_cache:
             runtime_cache[session_id]['memory'].clear()
-            
         return jsonify({"message": "Memory cleared"}), 200
     return jsonify({"error": "Session not found"}), 404
 
-@app.route('/debug/<session_id>', methods=['GET'])
-def debug_session(session_id):
-    has_data = session_id in sessions
-    has_runtime = session_id in runtime_cache
-    
-    chunks_count = len(sessions[session_id]['chunks']) if has_data else 0
-    history_count = len(sessions[session_id]['history']) if has_data else 0
-    
-    return jsonify({
-        "persisted_data": has_data,
-        "chunks_count": chunks_count,
-        "history_count": history_count,
-        "runtime_active": has_runtime,
-        "api_key_set": bool(os.environ.get('OPENAI_API_KEY'))
-    }), 200
-
 if __name__ == '__main__':
-    print("Starting local DeepSeek server...")
-    print("Server will run on http://localhost:5000")
     app.run(host='0.0.0.0', port=5000, debug=True)

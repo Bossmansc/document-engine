@@ -62,12 +62,12 @@ export interface Session {
 
 export interface AppConfig {
   apiKey: string;
+  apiUrl: string; // Added field for custom backend URL
   autoSave: boolean;
   chunkSize: number;
   overlapSize: number;
 }
 
-// New interface for conversation history
 export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
