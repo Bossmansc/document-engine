@@ -11,7 +11,6 @@ from langchain.chat_models import ChatOpenAI
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 import openai
-import json
 
 app = Flask(__name__)
 CORS(app)
@@ -21,7 +20,13 @@ UPLOAD_FOLDER = tempfile.gettempdir()
 ALLOWED_EXTENSIONS = {'pdf', 'txt', 'docx'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# Global storage for sessions
+# In-Memory Storage for Cloud Version
+# sessions[id] = {
+#    'chunks': [],
+#    'vectorstore': ...,
+#    'chain': ...,
+#    'memory': ...
+# }
 sessions = {}
 
 def allowed_file(filename):
@@ -67,51 +72,44 @@ def upload_file(session_id):
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
         
-        # Extract text based on file type
-        if filename.endswith('.pdf'):
-            text = extract_text_from_pdf(filepath)
-        elif filename.endswith('.txt'):
-            text = extract_text_from_txt(filepath)
-        else:
-            return jsonify({"error": "Unsupported file type"}), 400
-        
-        # Initialize session if not exists
-        if session_id not in sessions:
-            sessions[session_id] = {
-                'documents': [],
-                'vectorstore': None,
-                'conversation_chain': None,
-                'memory': ConversationBufferMemory(
-                    memory_key='chat_history',
-                    return_messages=True,
-                    output_key='answer'
-                )
-            }
-        
-        # Split text into chunks
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len,
-        )
-        chunks = text_splitter.split_text(text)
-        
-        # Store chunks in session
-        sessions[session_id]['documents'].extend(chunks)
-        
-        # Create embeddings and vectorstore
-        embeddings = OpenAIEmbeddings()
-        if sessions[session_id]['vectorstore'] is None:
-            sessions[session_id]['vectorstore'] = FAISS.from_texts(chunks, embeddings)
-        else:
-            sessions[session_id]['vectorstore'].add_texts(chunks)
-        
-        # Initialize conversation chain if not already exists
-        if sessions[session_id]['conversation_chain'] is None:
-            llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo")
-            retriever = sessions[session_id]['vectorstore'].as_retriever(
-                search_kwargs={"k": 4}
+        try:
+            if filename.endswith('.pdf'):
+                text = extract_text_from_pdf(filepath)
+            elif filename.endswith('.txt'):
+                text = extract_text_from_txt(filepath)
+            else:
+                return jsonify({"error": "Unsupported file type"}), 400
+            
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200,
+                length_function=len,
             )
+            chunks = text_splitter.split_text(text)
+            
+            # Init session
+            if session_id not in sessions:
+                sessions[session_id] = {
+                    'chunks': [],
+                    'vectorstore': None,
+                    'chain': None,
+                    'memory': ConversationBufferMemory(
+                        memory_key='chat_history',
+                        return_messages=True,
+                        output_key='answer'
+                    )
+                }
+            
+            # Store chunks
+            sessions[session_id]['chunks'].extend(chunks)
+            
+            # Rebuild Vectorstore
+            embeddings = OpenAIEmbeddings()
+            sessions[session_id]['vectorstore'] = FAISS.from_texts(sessions[session_id]['chunks'], embeddings)
+            
+            # Rebuild Chain
+            llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo")
+            retriever = sessions[session_id]['vectorstore'].as_retriever(search_kwargs={"k": 4})
             
             qa_chain = ConversationalRetrievalChain.from_llm(
                 llm=llm,
@@ -120,17 +118,18 @@ def upload_file(session_id):
                 return_source_documents=True,
                 verbose=True
             )
+            sessions[session_id]['chain'] = qa_chain
             
-            sessions[session_id]['conversation_chain'] = qa_chain
-        
-        # Clean up file
-        os.remove(filepath)
-        
-        return jsonify({
-            "message": "File processed successfully",
-            "chunks_count": len(chunks),
-            "filename": filename
-        }), 200
+            os.remove(filepath)
+            
+            return jsonify({
+                "message": "File processed successfully",
+                "chunks_count": len(chunks),
+                "filename": filename
+            }), 200
+        except Exception as e:
+            print(f"Upload error: {e}")
+            return jsonify({"error": str(e)}), 500
     
     return jsonify({"error": "File type not allowed"}), 400
 
@@ -143,38 +142,16 @@ def chat():
     if not session_id or not message:
         return jsonify({"error": "Missing session_id or message"}), 400
     
-    # Check if session exists
-    if session_id not in sessions:
-        return jsonify({
-            "response": "No session found. Please upload documents first to create a session.",
-            "sources": []
-        }), 200
-    
-    # Check if documents have been uploaded
-    if not sessions[session_id]['documents']:
-        return jsonify({
-            "response": "No documents uploaded for this session. Please upload documents first.",
-            "sources": []
-        }), 200
-    
-    # Check if conversation chain exists
-    if sessions[session_id]['conversation_chain'] is None:
-        return jsonify({
-            "response": "Document processing incomplete. Please wait for upload to complete.",
-            "sources": []
-        }), 200
+    if session_id not in sessions or not sessions[session_id]['chain']:
+        return jsonify({"response": "Please upload documents first.", "sources": []}), 200
     
     try:
-        # Get the conversation chain
-        qa_chain = sessions[session_id]['conversation_chain']
-        
-        # Get response - the memory is already maintained by the chain
+        qa_chain = sessions[session_id]['chain']
         result = qa_chain({"question": message})
         
-        # Extract sources
         sources = []
         if 'source_documents' in result:
-            for doc in result['source_documents'][:3]:  # Limit to top 3 sources
+            for doc in result['source_documents'][:3]:
                 source_text = doc.page_content[:100] + "..." if len(doc.page_content) > 100 else doc.page_content
                 sources.append(source_text)
         
@@ -184,34 +161,18 @@ def chat():
         }), 200
         
     except Exception as e:
-        print(f"Error in chat endpoint: {str(e)}")
-        return jsonify({
-            "response": f"Error processing your request: {str(e)}",
-            "sources": []
-        }), 500
+        print(f"Chat error: {str(e)}")
+        return jsonify({"response": f"Error: {str(e)}", "sources": []}), 500
 
 @app.route('/debug/<session_id>', methods=['GET'])
 def debug_session(session_id):
     if session_id in sessions:
-        session_data = sessions[session_id]
         return jsonify({
-            "has_documents": len(session_data['documents']) > 0,
-            "document_count": len(session_data['documents']),
-            "has_vectorstore": session_data['vectorstore'] is not None,
-            "has_conversation_chain": session_data['conversation_chain'] is not None,
-            "has_memory": session_data['memory'] is not None,
-            "memory_buffer": str(session_data['memory'].chat_memory.messages) if session_data['memory'] else "No memory"
+            "has_chunks": len(sessions[session_id]['chunks']) > 0,
+            "has_vectorstore": sessions[session_id]['vectorstore'] is not None,
+            "has_chain": sessions[session_id]['chain'] is not None
         }), 200
-    else:
-        return jsonify({"error": "Session not found"}), 404
-
-# Add endpoint to clear memory for testing
-@app.route('/clear_memory/<session_id>', methods=['POST'])
-def clear_memory(session_id):
-    if session_id in sessions and sessions[session_id]['memory']:
-        sessions[session_id]['memory'].clear()
-        return jsonify({"message": "Memory cleared"}), 200
-    return jsonify({"error": "Session not found or no memory"}), 404
+    return jsonify({"error": "Session not found"}), 404
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
