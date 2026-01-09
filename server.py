@@ -117,7 +117,8 @@ def upload_file(session_id):
                 llm=llm,
                 retriever=retriever,
                 memory=sessions[session_id]['memory'],
-                return_source_documents=True
+                return_source_documents=True,
+                verbose=True
             )
             
             sessions[session_id]['conversation_chain'] = qa_chain
@@ -142,9 +143,24 @@ def chat():
     if not session_id or not message:
         return jsonify({"error": "Missing session_id or message"}), 400
     
-    if session_id not in sessions or sessions[session_id]['conversation_chain'] is None:
+    # Check if session exists
+    if session_id not in sessions:
         return jsonify({
-            "response": "Please upload documents first before asking questions.",
+            "response": "No session found. Please upload documents first to create a session.",
+            "sources": []
+        }), 200
+    
+    # Check if documents have been uploaded
+    if not sessions[session_id]['documents']:
+        return jsonify({
+            "response": "No documents uploaded for this session. Please upload documents first.",
+            "sources": []
+        }), 200
+    
+    # Check if conversation chain exists
+    if sessions[session_id]['conversation_chain'] is None:
+        return jsonify({
+            "response": "Document processing incomplete. Please wait for upload to complete.",
             "sources": []
         }), 200
     
@@ -173,6 +189,29 @@ def chat():
             "response": f"Error processing your request: {str(e)}",
             "sources": []
         }), 500
+
+@app.route('/debug/<session_id>', methods=['GET'])
+def debug_session(session_id):
+    if session_id in sessions:
+        session_data = sessions[session_id]
+        return jsonify({
+            "has_documents": len(session_data['documents']) > 0,
+            "document_count": len(session_data['documents']),
+            "has_vectorstore": session_data['vectorstore'] is not None,
+            "has_conversation_chain": session_data['conversation_chain'] is not None,
+            "has_memory": session_data['memory'] is not None,
+            "memory_buffer": str(session_data['memory'].chat_memory.messages) if session_data['memory'] else "No memory"
+        }), 200
+    else:
+        return jsonify({"error": "Session not found"}), 404
+
+# Add endpoint to clear memory for testing
+@app.route('/clear_memory/<session_id>', methods=['POST'])
+def clear_memory(session_id):
+    if session_id in sessions and sessions[session_id]['memory']:
+        sessions[session_id]['memory'].clear()
+        return jsonify({"message": "Memory cleared"}), 200
+    return jsonify({"error": "Session not found or no memory"}), 404
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

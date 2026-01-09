@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { UploadedFile, AnalysisState, AnalysisDepth, TextSource } from '../types';
-import { FileText, Loader2, CheckCircle2, Pause, Play, Settings2, Key, AlertCircle, Trash2, X, Type, FileWarning, ExternalLink, RefreshCw, Globe, Plus, ChevronDown, ChevronUp } from 'lucide-react';
+import { FileText, Loader2, CheckCircle2, Pause, Play, Settings2, Key, AlertCircle, Trash2, X, Type, FileWarning, ExternalLink, RefreshCw, Globe, Plus, ChevronDown, ChevronUp, Bug, Eraser } from 'lucide-react';
 import FileUpload from './FileUpload';
 import { motion } from 'framer-motion';
 
@@ -21,12 +21,16 @@ interface AnalysisPanelProps {
   onOpenSettings: () => void;
   backendStatus?: 'unknown' | 'healthy' | 'unhealthy';
   onRetryConnection?: () => void;
+  onDebugSession?: () => void;
+  onClearMemory?: () => void;
 }
 
 export default function AnalysisPanel({ 
   files, textSources, state, depth, config, onUpload, onAddTextSource, onAddUrl, onDeleteFile, onDeleteTextSource, onStart, onPause, onDepthChange, onOpenSettings,
   backendStatus = 'unknown',
-  onRetryConnection
+  onRetryConnection,
+  onDebugSession,
+  onClearMemory
 }: AnalysisPanelProps) {
   const hasApiKey = !!config.apiKey; 
   const [showTextInput, setShowTextInput] = useState(false);
@@ -87,6 +91,24 @@ export default function AnalysisPanel({
             <div className="md:hidden text-slate-400 text-sm">
               {totalItems} item{totalItems !== 1 ? 's' : ''}
             </div>
+            {onClearMemory && (
+              <button
+                onClick={onClearMemory}
+                className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-red-400 transition-colors"
+                title="Clear Conversation Memory"
+              >
+                <Eraser className="w-4 h-4" />
+              </button>
+            )}
+            {onDebugSession && (
+              <button
+                onClick={onDebugSession}
+                className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-yellow-400 transition-colors"
+                title="Debug Session"
+              >
+                <Bug className="w-4 h-4" />
+              </button>
+            )}
             <button
               onClick={onOpenSettings}
               className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors"

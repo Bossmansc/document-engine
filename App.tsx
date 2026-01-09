@@ -11,7 +11,7 @@ export default function App() {
     setDepth, addFiles, addTextSource, addFromUrl, deleteFile, deleteTextSource,
     startAnalysis, pauseAnalysis, sendMessage, createSession, loadSession,
     deleteSession, updateConfig, exportSession, renameSession,
-    backendStatus, retryBackendConnection
+    backendStatus, retryBackendConnection, debugSession
   } = useAnalysis();
   
   const [activeTab, setActiveTab] = useState<'analysis' | 'chat'>('analysis');
@@ -19,7 +19,7 @@ export default function App() {
 
   return (
     <div className="flex flex-col md:flex-row h-screen w-full bg-slate-950 text-slate-200 font-sans overflow-hidden">
-      {}
+      {/* Mobile Tabs */}
       <div className="md:hidden flex border-b border-slate-800 bg-slate-900 shrink-0">
         <button 
           onClick={() => setActiveTab('analysis')} 
@@ -43,7 +43,7 @@ export default function App() {
         </button>
       </div>
 
-      {}
+      {/* Analysis Panel */}
       <div className={`${activeTab === 'analysis' ? 'flex' : 'hidden'} md:flex w-full md:w-[400px] lg:w-[35%] flex-shrink-0 h-full overflow-hidden`}>
         <AnalysisPanel 
           files={files} textSources={textSources} state={state} depth={depth} config={config}
@@ -53,10 +53,11 @@ export default function App() {
           onOpenSettings={() => setShowSettings(true)}
           backendStatus={backendStatus}
           onRetryConnection={retryBackendConnection}
+          onDebugSession={debugSession}
         />
       </div>
 
-      {}
+      {/* Chat Panel */}
       <div className={`${activeTab === 'chat' ? 'flex' : 'hidden'} md:flex flex-1 h-full min-w-0 overflow-hidden`}>
         <ChatPanel 
           messages={messages} 
@@ -67,7 +68,7 @@ export default function App() {
         />
       </div>
 
-      {}
+      {/* Settings Panel */}
       {showSettings && (
         <SettingsPanel
           config={config} sessions={sessions} currentSessionId={currentSessionId}

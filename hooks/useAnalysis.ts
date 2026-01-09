@@ -182,14 +182,19 @@ export const useAnalysis = () => {
         body: formData
       });
       
-      if (!response.ok) throw new Error('Upload failed');
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Upload failed:', errorText);
+        throw new Error(`Upload failed: ${response.status}`);
+      }
+      
       const data = await response.json();
       return {
         chunksProcessed: data.chunks_count,
         totalChunks: data.chunks_count
       };
     } catch (error) {
-      console.error(error);
+      console.error('File processing error:', error);
       throw error;
     }
   };
@@ -255,6 +260,14 @@ export const useAnalysis = () => {
                 } : f));
                 successCount++;
                 delete fileObjectsRef.current[entry.id];
+                
+                // Add success message
+                setMessages(prev => [...prev, {
+                  id: Date.now().toString(),
+                  role: 'system',
+                  content: `✅ Successfully uploaded and processed "${entry.name}" (${result.chunksProcessed} chunks)`,
+                  timestamp: Date.now()
+                }]);
             }
         } else {
             throw new Error("File data lost. Please remove and re-upload.");
@@ -262,8 +275,6 @@ export const useAnalysis = () => {
       } catch (error: any) {
         console.error("Processing failed for", entry.name, error);
         failCount++;
-        let errorMessage = 'Upload Failed';
-        if (error.message === 'SECURITY_BLOCK') errorMessage = 'Security Blocked (CORS/HTTP)';
         
         setFiles(prev => prev.map(f => f.id === entry.id ? { 
             ...f, 
@@ -277,6 +288,13 @@ export const useAnalysis = () => {
                 content: `⚠️ Could not auto-download "${entry.name}".\n\nReason: The website hosting this file (${new URL(entry.url || '').hostname}) blocks secure access (CORS/HTTPS).\n\nSolution: Please download the file manually using the link in the file list, then upload it here.`,
                 timestamp: Date.now()
             }]);
+        } else {
+          setMessages(prev => [...prev, {
+            id: Date.now().toString(),
+            role: 'system',
+            content: `❌ Failed to process "${entry.name}": ${error.message}`,
+            timestamp: Date.now()
+          }]);
         }
       }
       
@@ -292,7 +310,7 @@ export const useAnalysis = () => {
       setMessages(prev => [...prev, {
         id: Date.now().toString(),
         role: 'system',
-        content: `Successfully processed ${successCount} item(s). Ready to chat.`,
+        content: `✅ Successfully processed ${successCount} item(s). Ready to chat.`,
         timestamp: Date.now()
       }]);
     } else if (failCount > 0 && successCount === 0) {
@@ -376,11 +394,15 @@ export const useAnalysis = () => {
         body: JSON.stringify({
           session_id: currentSessionId,
           message: text
-          // Removed conversation_history - backend now maintains its own memory
         })
       });
       
-      if (!response.ok) throw new Error('Backend error');
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Chat error:', errorText);
+        throw new Error(`Backend error: ${response.status}`);
+      }
+      
       const data = await response.json();
       
       const aiMsg: Message = {
@@ -505,10 +527,46 @@ export const useAnalysis = () => {
     }
   };
 
+  const debugSession = async () => {
+    try {
+      const response = await fetchWithRetry(`/debug/${currentSessionId}`);
+      if (response.ok) {
+        const data = await response.json();
+        setMessages(prev => [...prev, {
+          id: Date.now().toString(),
+          role: 'system',
+          content: `🔍 Session Debug:\n- Has documents: ${data.has_documents}\n- Document count: ${data.document_count}\n- Has vectorstore: ${data.has_vectorstore}\n- Has conversation chain: ${data.has_conversation_chain}\n- Has memory: ${data.has_memory}\n- Memory buffer: ${data.memory_buffer ? 'Exists' : 'Empty'}`,
+          timestamp: Date.now()
+        }]);
+      }
+    } catch (error) {
+      console.error('Debug error:', error);
+    }
+  };
+
+  const clearMemory = async () => {
+    try {
+      const response = await fetchWithRetry(`/clear_memory/${currentSessionId}`, {
+        method: 'POST'
+      });
+      if (response.ok) {
+        setMessages(prev => [...prev, {
+          id: Date.now().toString(),
+          role: 'system',
+          content: '🧹 Memory cleared for current session.',
+          timestamp: Date.now()
+        }]);
+      }
+    } catch (error) {
+      console.error('Clear memory error:', error);
+    }
+  };
+
   return {
     files, textSources, messages, depth, state, sessions, currentSessionId, config,
     setDepth, addFiles, addTextSource, addFromUrl, deleteFile, deleteTextSource,
     startAnalysis, pauseAnalysis, sendMessage, createSession, loadSession, deleteSession,
-    updateConfig, exportSession, renameSession, backendStatus, retryBackendConnection
+    updateConfig, exportSession, renameSession, backendStatus, retryBackendConnection,
+    debugSession, clearMemory
   };
 };
