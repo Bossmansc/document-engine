@@ -31,7 +31,8 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 sessions = {}
 
 # --- PROMPTS ---
-condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question.
+# 1. Condense Question Prompt: Ensures we carry context forward
+condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question that includes necessary context.
 If the follow up question is a greeting (like "hi", "hello") or purely conversational, return it exactly as is.
 
 Chat History:
@@ -42,21 +43,23 @@ Follow Up Input: {question}
 Standalone question:"""
 CONDENSE_PROMPT = PromptTemplate.from_template(condense_template)
 
-answer_template = """You are a helpful and conversational AI assistant capable of analyzing uploaded documents.
+# 2. Answer Prompt: Explicitly Instructs to use History
+answer_template = """You are a helpful and conversational AI assistant. You have access to a conversation history and a set of uploaded documents.
 
-CONTEXT FROM DOCUMENTS:
-{context}
-
-CONVERSATION HISTORY:
+--- CONVERSATION HISTORY ---
 {chat_history}
 
-USER QUESTION: {question}
+--- DOCUMENT CONTEXT ---
+{context}
 
-INSTRUCTIONS:
-1. FIRST, check the "CONTEXT FROM DOCUMENTS". If the answer is there, use it.
-2. SECOND, check the "CONVERSATION HISTORY". If the user refers to something said earlier (like their name, or a previous topic), use that context.
-3. If the answer is not in the documents or history, you may use general knowledge but MUST explicitly state: "This isn't mentioned in the documents, but...".
-4. Be conversational. Do not just output facts; engage with the user.
+--- USER QUESTION ---
+{question}
+
+--- INSTRUCTIONS ---
+1. **Conversational Continuity**: Look at the CONVERSATION HISTORY. If the user is referring to something discussed previously (like their name, a specific topic, or a previous answer), prioritize that context.
+2. **Document Knowledge**: Use the DOCUMENT CONTEXT to answer specific questions about the files.
+3. **General Knowledge**: If the answer is not in the documents, you may use general knowledge, but be polite and conversational about it.
+4. **Tone**: Be helpful, engaging, and human-like. Do not be robotic.
 
 Answer:"""
 ANSWER_PROMPT = PromptTemplate(
@@ -151,6 +154,7 @@ def upload_file(session_id):
                     'memory': ConversationBufferMemory(
                         memory_key='chat_history',
                         input_key='question',
+                        output_key='answer',
                         return_messages=True
                     )
                 }
@@ -159,7 +163,6 @@ def upload_file(session_id):
             sessions[session_id]['chunks'].extend(chunks)
             
             # Note: We rebuild the vectorstore to include new chunks. 
-            # In a production DB, we would just .add_texts()
             embeddings = OpenAIEmbeddings()
             sessions[session_id]['vectorstore'] = FAISS.from_texts(sessions[session_id]['chunks'], embeddings)
             
@@ -188,10 +191,17 @@ def chat():
         return jsonify({"error": "Missing session_id or message"}), 400
     
     if session_id not in sessions:
-         return jsonify({
-             "response": "I don't have a session for you yet. Please upload a document to start the conversation!", 
-             "sources": []
-         }), 200
+         # If no session, create a temp one for pure chat
+         sessions[session_id] = {
+            'chunks': [],
+            'vectorstore': None,
+            'memory': ConversationBufferMemory(
+                memory_key='chat_history',
+                input_key='question',
+                output_key='answer',
+                return_messages=True
+            )
+         }
     
     session = sessions[session_id]
     
@@ -204,8 +214,11 @@ def chat():
         
         # 1. Get History
         memory = session['memory']
-        chat_history = memory.load_memory_variables({})['chat_history']
+        history_vars = memory.load_memory_variables({})
+        chat_history = history_vars.get('chat_history', [])
         
+        logger.info(f"Session {session_id} History Length: {len(chat_history)} messages")
+
         # 2. Condense Question (if we have history)
         standalone_question = message
         if chat_history:
@@ -247,7 +260,7 @@ def chat():
         }), 200
         
     except Exception as e:
-        logger.error(f"Chat error: {e}")
+        logger.error(f"Chat error: {e}", exc_info=True)
         return jsonify({"response": f"I encountered an error processing that: {str(e)}", "sources": []}), 500
 
 @app.route('/debug/<session_id>', methods=['GET'])

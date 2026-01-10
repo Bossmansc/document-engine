@@ -7,7 +7,6 @@ import logging
 from werkzeug.utils import secure_filename
 import PyPDF2
 
-# LangChain Imports
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
@@ -31,7 +30,7 @@ sessions = {}
 
 # --- PROMPTS ---
 condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question.
-If the question is greetings or chat, leave it as is.
+If the question is greetings or chat, return it as is.
 
 Chat History:
 {chat_history}
@@ -41,21 +40,21 @@ Follow Up Input: {question}
 Standalone question:"""
 CONDENSE_PROMPT = PromptTemplate.from_template(condense_template)
 
-answer_template = """You are a highly intelligent and conversational AI assistant capable of analyzing documents.
+answer_template = """You are a helpful and conversational AI assistant.
 
-CONTEXT FROM DOCUMENTS:
-{context}
-
-CONVERSATION HISTORY:
+--- CONVERSATION HISTORY ---
 {chat_history}
 
-USER QUESTION: {question}
+--- DOCUMENT CONTEXT ---
+{context}
 
-INSTRUCTIONS:
-1. FIRST, check the "CONTEXT FROM DOCUMENTS".
-2. SECOND, check the "CONVERSATION HISTORY".
-3. If neither, use general knowledge but mention it is not in the docs.
-4. Be conversational.
+--- USER QUESTION ---
+{question}
+
+--- INSTRUCTIONS ---
+1. Use CONVERSATION HISTORY to understand context (names, topics, etc).
+2. Use DOCUMENT CONTEXT for factual answers.
+3. Be conversational.
 
 Answer:"""
 ANSWER_PROMPT = PromptTemplate(
@@ -107,12 +106,17 @@ def format_chat_history(history):
 
 def get_session_objects(session_id):
     if session_id not in sessions:
-        return None
+        sessions[session_id] = {'chunks': [], 'history': []}
     
     s_data = sessions[session_id]
     
     # Rebuild Memory
-    memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
+    memory = ConversationBufferMemory(
+        memory_key='chat_history',
+        input_key='question',
+        output_key='answer',
+        return_messages=True
+    )
     history_data = s_data.get('history', [])
     for role, content in history_data:
         if role == 'user':
@@ -183,23 +187,20 @@ def chat():
     if not os.environ.get('OPENAI_API_KEY'): return jsonify({"response": "API Key missing"}), 200
 
     runtime = get_session_objects(session_id)
-    if not runtime: return jsonify({"response": "Upload document first."}), 200
 
     try:
         llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo")
         
-        # 1. History
         memory = runtime['memory']
-        chat_history = memory.load_memory_variables({})['chat_history']
+        history_vars = memory.load_memory_variables({})
+        chat_history = history_vars.get('chat_history', [])
         
-        # 2. Standalone
         standalone_question = message
         if chat_history:
             history_str = format_chat_history(chat_history)
             condense_chain = LLMChain(llm=llm, prompt=CONDENSE_PROMPT)
             standalone_question = condense_chain.run(chat_history=history_str, question=message)
         
-        # 3. Retrieve
         context_text = "No docs found."
         sources = []
         if runtime['vectorstore']:
@@ -208,12 +209,10 @@ def chat():
                 context_text = "\n\n".join([d.page_content for d in docs])
                 sources = [d.page_content[:100] + "..." for d in docs[:3]]
         
-        # 4. Answer
         history_str = format_chat_history(chat_history)
         answer_chain = LLMChain(llm=llm, prompt=ANSWER_PROMPT)
         response = answer_chain.run(context=context_text, chat_history=history_str, question=message)
         
-        # 5. Save
         sessions[session_id]['history'].append(('user', message))
         sessions[session_id]['history'].append(('assistant', response))
         save_sessions(sessions)
