@@ -17,8 +17,8 @@ export interface UploadedFile {
   content?: string;
   url?: string; 
   chunks?: DocumentChunk[];
-  analysisResults?: string[]; 
-  deepAnalysis?: DeepAnalysisReport; 
+  analysisResults?: string[]; // Quick analysis (bullets)
+  deepAnalysis?: DeepAnalysisReport; // Comprehensive analysis
 }
 
 export interface DocumentChunk {
