@@ -1,5 +1,11 @@
 export type AnalysisDepth = 'quick' | 'deep' | 'thematic';
 
+export interface DeepAnalysisReport {
+  summary: string;
+  keyPoints: string[];
+  topics: string[];
+}
+
 export interface UploadedFile {
   id: string;
   name: string;
@@ -11,7 +17,8 @@ export interface UploadedFile {
   content?: string;
   url?: string; 
   chunks?: DocumentChunk[];
-  analysisResults?: string[];
+  analysisResults?: string[]; // Quick analysis (bullets)
+  deepAnalysis?: DeepAnalysisReport; // Comprehensive analysis
 }
 
 export interface DocumentChunk {
@@ -62,7 +69,7 @@ export interface Session {
 
 export interface AppConfig {
   apiKey: string;
-  apiUrl: string; // Added field for custom backend URL
+  apiUrl: string; 
   autoSave: boolean;
   chunkSize: number;
   overlapSize: number;

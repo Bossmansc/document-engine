@@ -11,15 +11,16 @@ export default function App() {
     setDepth, addFiles, addTextSource, addFromUrl, deleteFile, deleteTextSource,
     startAnalysis, pauseAnalysis, sendMessage, createSession, loadSession,
     deleteSession, updateConfig, exportSession, renameSession,
-    backendStatus, retryBackendConnection, debugSession, clearMemory
+    backendStatus, retryBackendConnection, debugSession, clearMemory,
+    performDeepAnalysis // New function
   } = useAnalysis();
-  
+
   const [activeTab, setActiveTab] = useState<'analysis' | 'chat'>('analysis');
   const [showSettings, setShowSettings] = useState(false);
 
   return (
     <div className="flex flex-col md:flex-row h-screen w-full bg-slate-950 text-slate-200 font-sans overflow-hidden">
-      {/* Mobile Tabs */}
+      {/* Mobile Nav */}
       <div className="md:hidden flex border-b border-slate-800 bg-slate-900 shrink-0">
         <button 
           onClick={() => setActiveTab('analysis')} 
@@ -55,6 +56,7 @@ export default function App() {
           onRetryConnection={retryBackendConnection}
           onDebugSession={debugSession}
           onClearMemory={clearMemory}
+          onPerformDeepAnalysis={performDeepAnalysis} // Passed down
         />
       </div>
 
@@ -69,7 +71,7 @@ export default function App() {
         />
       </div>
 
-      {/* Settings Panel */}
+      {/* Settings Modal */}
       {showSettings && (
         <SettingsPanel
           config={config} sessions={sessions} currentSessionId={currentSessionId}

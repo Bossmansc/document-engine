@@ -4,6 +4,7 @@ import os
 import tempfile
 import pickle
 import logging
+import json
 from werkzeug.utils import secure_filename
 import PyPDF2
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -12,7 +13,6 @@ from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,7 +25,6 @@ ALLOWED_EXTENSIONS = {'pdf', 'txt', 'docx'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 STATE_FILE = 'deepseek_state.pkl'
 
-# Persistence
 persistent_store = {}
 active_runtimes = {}
 
@@ -35,30 +34,20 @@ def load_persistence():
         try:
             with open(STATE_FILE, 'rb') as f:
                 persistent_store = pickle.load(f)
-        except Exception as e:
-            logger.error(f"Error loading: {e}")
-            persistent_store = {}
+        except Exception: persistent_store = {}
 
 def save_persistence():
     try:
         with open(STATE_FILE, 'wb') as f:
             pickle.dump(persistent_store, f)
-    except Exception as e:
-        logger.error(f"Error saving: {e}")
+    except Exception: pass
 
 load_persistence()
 
 def get_or_create_runtime(session_id):
-    if session_id in active_runtimes:
-        return active_runtimes[session_id]
-        
+    if session_id in active_runtimes: return active_runtimes[session_id]
     if session_id in persistent_store:
         data = persistent_store[session_id]
-        memory = ConversationBufferMemory(memory_key='chat_history', input_key='question', output_key='answer', return_messages=True)
-        for role, content in data.get('history', []):
-            if role == 'user': memory.chat_memory.add_user_message(content)
-            elif role == 'assistant': memory.chat_memory.add_ai_message(content)
-            
         vectorstore = None
         chunks = data.get('chunks', [])
         if chunks and os.environ.get('OPENAI_API_KEY'):
@@ -66,26 +55,39 @@ def get_or_create_runtime(session_id):
                 embeddings = OpenAIEmbeddings()
                 vectorstore = FAISS.from_texts(chunks, embeddings)
             except Exception: pass
-            
-        runtime = {'memory': memory, 'vectorstore': vectorstore}
+        runtime = {'vectorstore': vectorstore}
         active_runtimes[session_id] = runtime
         return runtime
     return None
 
 def init_new_session(session_id):
     if session_id not in persistent_store:
-        persistent_store[session_id] = {'chunks': [], 'history': []}
+        persistent_store[session_id] = {'chunks': [], 'history': [], 'file_texts': {}}
         save_persistence()
     if session_id not in active_runtimes:
-        active_runtimes[session_id] = {
-            'vectorstore': None, 
-            'memory': ConversationBufferMemory(memory_key='chat_history', input_key='question', output_key='answer', return_messages=True)
-        }
+        active_runtimes[session_id] = {'vectorstore': None}
     return active_runtimes[session_id]
 
-# Prompts and Helpers
-condense_template = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question.
-If the question is greetings or chat, return it as is.
+# Prompts
+summary_template = """You are an expert document analyst. 
+Below is the beginning of a document. 
+Please provide a concise analysis (max 3 bullet points).
+Document text: {text}
+Analysis (3 bullet points):"""
+SUMMARY_PROMPT = PromptTemplate.from_template(summary_template)
+
+deep_analysis_template = """You are a senior researcher. 
+Analyze the following document text and provide a structured report.
+Document Text (Excerpt):
+{text}
+Please provide:
+1. Executive Summary
+2. Key Topics (list)
+3. Critical Insight
+Format as JSON keys: "summary", "keyPoints", "topics"."""
+DEEP_ANALYSIS_PROMPT = PromptTemplate.from_template(deep_analysis_template)
+
+condense_template = """Rephrase follow up question to be standalone.
 Chat History: {chat_history}
 Follow Up Input: {question}
 Standalone question:"""
@@ -98,10 +100,6 @@ answer_template = """You are a helpful and conversational AI assistant.
 {context}
 --- USER QUESTION ---
 {question}
---- INSTRUCTIONS ---
-1. Use CONVERSATION HISTORY to understand context.
-2. Use DOCUMENT CONTEXT for factual answers.
-3. Be conversational.
 Answer:"""
 ANSWER_PROMPT = PromptTemplate(input_variables=["context", "chat_history", "question"], template=answer_template)
 
@@ -121,12 +119,13 @@ def extract_text_from_txt(filepath):
     with open(filepath, 'r', encoding='utf-8') as file:
         return file.read()
 
-def format_chat_history(history):
+def format_history_from_list(history_list):
     formatted = []
-    for msg in history:
-        if isinstance(msg, HumanMessage): formatted.append(f"User: {msg.content}")
-        elif isinstance(msg, AIMessage): formatted.append(f"Assistant: {msg.content}")
-        else: formatted.append(f"System: {msg.content}")
+    for msg in history_list:
+        role = msg.get('role', 'user')
+        content = msg.get('content', '')
+        if role == 'user': formatted.append(f"User: {content}")
+        elif role == 'assistant': formatted.append(f"Assistant: {content}")
     return "\n".join(formatted)
 
 @app.route('/health', methods=['GET'])
@@ -147,11 +146,9 @@ def upload_file(session_id):
     if 'file' not in request.files: return jsonify({"error": "No file"}), 400
     file = request.files['file']
     if file.filename == '' or not allowed_file(file.filename): return jsonify({"error": "Invalid file"}), 400
-    
     filename = secure_filename(file.filename)
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     file.save(filepath)
-    
     try:
         if filename.endswith('.pdf'): text = extract_text_from_pdf(filepath)
         elif filename.endswith('.txt'): text = extract_text_from_txt(filepath)
@@ -160,65 +157,63 @@ def upload_file(session_id):
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200, length_function=len)
         chunks = text_splitter.split_text(text)
         
-        if session_id not in persistent_store: persistent_store[session_id] = {'chunks': [], 'history': []}
+        if session_id not in persistent_store: persistent_store[session_id] = {'chunks': [], 'history': [], 'file_texts': {}}
+        if 'file_texts' not in persistent_store[session_id]: persistent_store[session_id]['file_texts'] = {}
+            
         persistent_store[session_id]['chunks'].extend(chunks)
+        persistent_store[session_id]['file_texts'][filename] = text
         save_persistence()
         
         if session_id in active_runtimes: del active_runtimes[session_id]
         get_or_create_runtime(session_id)
-        
         os.remove(filepath)
-        return jsonify({"message": "Success", "chunks_count": len(chunks)}), 200
+        preview = " ".join(text[:300].split()) + "..."
+        
+        analysis_points = []
+        if os.environ.get('OPENAI_API_KEY'):
+            try:
+                summary_context = text[:4000]
+                llm = ChatOpenAI(temperature=0.3, model_name="gpt-3.5-turbo")
+                summary_chain = LLMChain(llm=llm, prompt=SUMMARY_PROMPT)
+                raw_analysis = summary_chain.run(text=summary_context)
+                analysis_points = [line.strip().lstrip('-•*').strip() for line in raw_analysis.split('\n') if line.strip()]
+            except Exception: pass
+            
+        return jsonify({
+            "message": "Success", 
+            "chunks_count": len(chunks), 
+            "text_preview": preview,
+            "analysis_results": analysis_points
+        }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/chat', methods=['POST'])
-def chat():
+@app.route('/analyze_document', methods=['POST'])
+def analyze_document():
     data = request.json
     session_id = data.get('session_id')
-    message = data.get('message')
-    if not session_id or not message: return jsonify({"error": "Missing data"}), 400
+    filename = data.get('filename')
     
-    runtime = get_or_create_runtime(session_id)
-    if not runtime: runtime = init_new_session(session_id)
+    if not session_id or not filename: return jsonify({"error": "Missing data"}), 400
+    if session_id not in persistent_store: return jsonify({"error": "Session not found"}), 404
+    
+    text = persistent_store[session_id].get('file_texts', {}).get(filename)
+    if not text: return jsonify({"error": "Text not found"}), 404
     
     try:
-        if not os.environ.get('OPENAI_API_KEY'): return jsonify({"response": "API Key missing"}), 200
-        llm = ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo")
-        memory = runtime['memory']
-        chat_history = memory.load_memory_variables({}).get('chat_history', [])
-        
-        standalone = message
-        if chat_history:
-            standalone = LLMChain(llm=llm, prompt=CONDENSE_PROMPT).run(chat_history=format_chat_history(chat_history), question=message)
+        if not os.environ.get('OPENAI_API_KEY'): return jsonify({"error": "API Key missing"}), 400
+        total_len = len(text)
+        if total_len > 12000:
+            part_len = 4000
+            beginning = text[:part_len]
+            middle_start = total_len // 2 - (part_len // 2)
+            middle = text[middle_start : middle_start + part_len]
+            end = text[-part_len:]
+            analysis_context = f"--- START ---\n{beginning}\n\n--- MIDDLE ---\n{middle}\n\n--- END ---\n{end}"
+        else:
+            analysis_context = text
             
-        context = "No docs found."
-        sources = []
-        if runtime['vectorstore']:
-            docs = runtime['vectorstore'].similarity_search(standalone, k=4)
-            if docs:
-                context = "\n\n".join([d.page_content for d in docs])
-                sources = [d.page_content[:100] + "..." for d in docs[:3]]
-                
-        response = LLMChain(llm=llm, prompt=ANSWER_PROMPT).run(context=context, chat_history=format_chat_history(chat_history), question=message)
-        
-        memory.save_context({"question": message}, {"answer": response})
-        persistent_store[session_id]['history'].append(('user', message))
-        persistent_store[session_id]['history'].append(('assistant', response))
-        save_persistence()
-        
-        return jsonify({"response": response, "sources": sources}), 200
-    except Exception as e:
-        return jsonify({"response": f"Error: {e}", "sources": []}), 500
-
-@app.route('/clear_memory/<session_id>', methods=['POST'])
-def clear_memory(session_id):
-    if session_id in persistent_store:
-        persistent_store[session_id]['history'] = []
-        save_persistence()
-    if session_id in active_runtimes:
-        active_runtimes[session_id]['memory'].clear()
-    return jsonify({"message": "Cleared"}), 200
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+        llm = ChatOpenAI(temperature=0.3, model_name="gpt-3.5-turbo")
+        chain = LLMChain(llm=llm, prompt=DEEP_ANALYSIS_PROMPT)
+        result_json_str = chain.run(text=analysis_context)
+        clean_json = result_json_str.replace("
